@@ -16,6 +16,108 @@ __date__ = "05/15"
  Algorithms for diffusion pathway analysis
 """
 
+class Grid(object):
+    """
+    A 3D grid used for analysing diffusion trajectories.
+    """
+    def __init__( self, lattice, interval ):
+        """
+        Initialization.
+
+        Args:
+            lattice (Lattice): A Pymatgen Lattice object, used to define the
+                dimensions of this Grid.
+            interval (float): the interval between two nearest grid points
+                (in Angstroms).
+        """
+        self.lattice = lattice
+        self.interval = interval
+        self.frac_interval = [self.interval / l for l in self.lattice.abc]
+        # generate the 3-D grid
+        self.ra = np.arange(0.0, 1.0, self.frac_interval[0])
+        self.rb = np.arange(0.0, 1.0, self.frac_interval[1])
+        self.rc = np.arange(0.0, 1.0, self.frac_interval[2])
+        self.lens = [len(self.ra), len(self.rb), len(self.rc)]
+        self.ngrid = self.lens[0] * self.lens[1] * self.lens[2]
+
+        agrid = self.ra[:, None] * np.array([1, 0, 0])[None, :]
+        bgrid = self.rb[:, None] * np.array([0, 1, 0])[None, :]
+        cgrid = self.rc[:, None] * np.array([0, 0, 1])[None, :]
+
+        self.grid = agrid[:, None, None] + bgrid[None, :, None] + cgrid[None, None, :]
+
+    def nearest_point(self, fcoord):
+        """
+        Find the nearest grid point to a fractional coordinate, out of the eight
+        points that surround an atom.
+        
+        Args:
+            fcoord (np.array(float)): Fractional coordinates of the atom.
+       
+        Returns:
+            (int): The grid index for the nearest grid point.
+        """
+        corner_i = [int(c / d) for c, d in zip(fcoord, self.frac_interval)]
+        next_i = np.zeros_like(corner_i, dtype=int)
+
+        # consider PBC
+        for i in range(3):
+            next_i[i] = corner_i[i] + 1 if corner_i[i] < self.lens[i] - 1 else 0
+
+        agrid = np.array([corner_i[0], next_i[0]])[:, None] * \
+                np.array([1, 0, 0])[None, :]
+        bgrid = np.array([corner_i[1], next_i[1]])[:, None] * \
+                np.array([0, 1, 0])[None, :]
+        cgrid = np.array([corner_i[2], next_i[2]])[:, None] * \
+                np.array([0, 0, 1])[None, :]
+
+        grid_indices = agrid[:, None, None] + bgrid[None, :, None] + \
+                       cgrid[None, None, :]
+        grid_indices = grid_indices.reshape(8, 3)
+
+        mini_grid = [self.grid[indx[0], indx[1], indx[2]] for indx in
+                     grid_indices]
+        dist_matrix = self.lattice.get_all_distances(mini_grid, fcoord)
+        indx = np.where(dist_matrix == np.min(dist_matrix, axis=0)[None, :])[0][0]
+
+        # 3-index label mapping to single index
+        min_indx = grid_indices[indx][0] * len(self.rb) * len(self.rc) + \
+                   grid_indices[indx][1] * len(self.rc) + grid_indices[indx][2]
+
+        # make sure the index does not go out of bounds.
+        if not (0 <= min_indx < self.ngrid):
+            raise ValueError( 'nearest point index is out of bounds for this grid.' )
+
+        return min_indx
+
+    def calculate_Pr( self, trajectories, indices ):
+        """
+        Calculate time-averaged probability density function distribution Pr.
+
+        Args:
+            trajectories (numpy array): ionic trajectories of the structure
+                from MD simulations. It should be: 
+                (1) stored as 3D array [Ntimesteps, Nions, 3] where 3 refers 
+                    to a,b,c components;
+                (2) in fractional coordinates.
+            indices (list(int): list of indices for atoms to include in the
+                contributions to Pr.
+
+        Returns:
+            (np.array([float, float, float]): 3D numpy array of the
+                time-averaged probability density function.
+        """
+        nsteps = len(trajectories)
+        count = Counter()
+        Pr = np.zeros(self.ngrid, dtype=np.double)
+        for it in range(nsteps):
+            fcoords = trajectories[it][indices, :]
+            for fcoord in fcoords:
+                count.update( [ self.nearest_point(fcoord) ] )
+        for i, n in count.most_common(self.ngrid):
+            Pr[i] = float(n) / nsteps / len(indices) / self.lattice.volume * self.ngrid
+        Pr = Pr.reshape(self.lens[0], self.lens[1], self.lens[2])
+        return Pr
 
 class ProbabilityDensityAnalysis(object):
     """
@@ -31,18 +133,23 @@ class ProbabilityDensityAnalysis(object):
     """
 
     def __init__(self, structure, trajectories, interval=0.5,
-                 species=("Li", "Na")):
+                 species=("Li", "Na"), symmetry_operations=None):
         """
         Initialization.
+
         Args:
             structure (Structure): crystal structure
             trajectories (numpy array): ionic trajectories of the structure
                 from MD simulations. It should be (1) stored as 3-D array [
                 Ntimesteps, Nions, 3] where 3 refers to a,b,c components;
                 (2) in fractional coordinates.
-            interval(float): the interval between two nearest grid points
+            interval (float): the interval between two nearest grid points
                 (in Angstrom)
-            species(list of str): list of species that are of interest
+            species (list of str): list of species that are of interest
+            symmetry_operations (:obj:`list(SymmOp)`), optional): optional list
+                of pymatgen `SymmOp` symmetry operations. If these are provided
+                the positions of the mobile ions will be symmetrised according
+                to the operations in this list. 
         """
 
         # initial settings
@@ -50,81 +157,18 @@ class ProbabilityDensityAnalysis(object):
 
         # All fractional coordinates are between 0 and 1.
         trajectories -= np.floor(trajectories)
-        assert np.all(trajectories >= 0) and np.all(trajectories <= 1)
+        if not ( np.all(trajectories >= 0) and np.all(trajectories <= 1) ):
+            raise ValueError( 'Fractional coordinates are not all between 0 and 1' )
 
-        indices = [j for j, site in enumerate(structure) if
-                   site.specie.symbol in species]
-        lattice = structure.lattice
-        frac_interval = [interval / l for l in lattice.abc]
-        nsteps = len(trajectories)
-
-        # generate the 3-D grid
-        ra = np.arange(0.0, 1.0, frac_interval[0])
-        rb = np.arange(0.0, 1.0, frac_interval[1])
-        rc = np.arange(0.0, 1.0, frac_interval[2])
-        lens = [len(ra), len(rb), len(rc)]
-        ngrid = lens[0] * lens[1] * lens[2]
-
-        agrid = ra[:, None] * np.array([1, 0, 0])[None, :]
-        bgrid = rb[:, None] * np.array([0, 1, 0])[None, :]
-        cgrid = rc[:, None] * np.array([0, 0, 1])[None, :]
-
-        grid = agrid[:, None, None] + bgrid[None, :, None] + cgrid[None, None,
-                                                             :]
-
+        grid = Grid(structure.lattice, interval)
         # Calculate time-averaged probability density function distribution Pr
-        count = Counter()
-        Pr = np.zeros(ngrid, dtype=np.double)
-
-        for it in range(nsteps):
-            fcoords = trajectories[it][indices, :]
-            for fcoord in fcoords:
-                # for each atom at time t, find the nearest grid point from
-                # the 8 points that surround the atom
-                corner_i = [int(c / d) for c, d in zip(fcoord, frac_interval)]
-                next_i = np.zeros_like(corner_i, dtype=int)
-
-                # consider PBC
-                for i in range(3):
-                    next_i[i] = corner_i[i] + 1 if corner_i[i] < lens[i] - 1 else 0
-
-                agrid = np.array([corner_i[0], next_i[0]])[:, None] * \
-                        np.array([1, 0, 0])[None, :]
-                bgrid = np.array([corner_i[1], next_i[1]])[:, None] * \
-                        np.array([0, 1, 0])[None, :]
-                cgrid = np.array([corner_i[2], next_i[2]])[:, None] * \
-                        np.array([0, 0, 1])[None, :]
-
-                grid_indices = agrid[:, None, None] + bgrid[None, :, None] + \
-                               cgrid[None, None, :]
-                grid_indices = grid_indices.reshape(8, 3)
-
-                mini_grid = [grid[indx[0], indx[1], indx[2]] for indx in
-                             grid_indices]
-                dist_matrix = lattice.get_all_distances(mini_grid, fcoord)
-                indx = \
-                np.where(dist_matrix == np.min(dist_matrix, axis=0)[None, :])[
-                    0][0]
-
-                # 3-index label mapping to single index
-                min_indx = grid_indices[indx][0] * len(rb) * len(rc) + \
-                           grid_indices[indx][1] * len(rc) + grid_indices[indx][
-                               2]
-
-                # make sure the index does not go out of bound.
-                assert 0 <= min_indx < ngrid
-
-                count.update([min_indx])
-
-        for i, n in count.most_common(ngrid):
-            Pr[i] = float(n) / nsteps / len(indices) / lattice.volume * ngrid
-
-        Pr = Pr.reshape(lens[0], lens[1], lens[2])
-
+        indices = [j for j, site in enumerate(structure) if site.specie.symbol in species]
+        Pr = grid.calculate_Pr( trajectories, indices )
+   
         self.structure = structure
         self.trajectories = trajectories
         self.interval = interval
-        self.lens = lens
+        self.lens = grid.lens
         self.Pr = Pr
         self.species = species
         self.stable_sites = None
