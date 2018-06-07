@@ -90,7 +90,7 @@ class Grid(object):
 
         return min_indx
 
-    def calculate_Pr( self, trajectories, indices ):
+    def calculate_Pr( self, trajectories, indices, symmetry_operations=None ):
         """
         Calculate time-averaged probability density function distribution Pr.
 
@@ -102,6 +102,10 @@ class Grid(object):
                 (2) in fractional coordinates.
             indices (list(int): list of indices for atoms to include in the
                 contributions to Pr.
+            symmetry_operations (:obj:`list(SymmOp)`), optional): optional list
+                of pymatgen `SymmOp` symmetry operations. If these are provided
+                the positions of the mobile ions will be symmetrised according
+                to the operations in this list. 
 
         Returns:
             (np.array([float, float, float]): 3D numpy array of the
@@ -113,7 +117,15 @@ class Grid(object):
         for it in range(nsteps):
             fcoords = trajectories[it][indices, :]
             for fcoord in fcoords:
-                count.update( [ self.nearest_point(fcoord) ] )
+                if symmetry_operations:
+                    for symmop in symmetry_operations:
+                        ccoord = self.lattice.get_cartesian_coords( fcoord )
+                        mapped_fcoord = self.lattice.get_fractional_coords( 
+                            symmop.operate( ccoord ) )
+                        pbc_mapped_fcoord = np.mod( mapped_fcoord, 1 ) 
+                        count.update( [ self.nearest_point( pbc_mapped_fcoord ) ] )
+                else:
+                    count.update( [ self.nearest_point(fcoord) ] )
         for i, n in count.most_common(self.ngrid):
             Pr[i] = float(n) / nsteps / len(indices) / self.lattice.volume * self.ngrid
         Pr = Pr.reshape(self.lens[0], self.lens[1], self.lens[2])
@@ -163,7 +175,7 @@ class ProbabilityDensityAnalysis(object):
         grid = Grid(structure.lattice, interval)
         # Calculate time-averaged probability density function distribution Pr
         indices = [j for j, site in enumerate(structure) if site.specie.symbol in species]
-        Pr = grid.calculate_Pr( trajectories, indices )
+        Pr = grid.calculate_Pr( trajectories, indices, symmetry_operations )
    
         self.structure = structure
         self.trajectories = trajectories
@@ -175,7 +187,7 @@ class ProbabilityDensityAnalysis(object):
 
     @classmethod
     def from_diffusion_analyzer(cls, diffusion_analyzer, interval=0.5,
-                                species=("Li", "Na")):
+                                species=("Li", "Na"), symmetry_operations=None):
         """
         Create a ProbabilityDensityAnalysis from a diffusion_analyzer object.
 
@@ -185,6 +197,10 @@ class ProbabilityDensityAnalysis(object):
             interval(float): the interval between two nearest grid points (in
                 Angstrom)
             species(list of str): list of species that are of interest
+            symmetry_operations (:obj:`list(SymmOp)`), optional): optional list
+                of pymatgen `SymmOp` symmetry operations. If these are provided
+                the positions of the mobile ions will be symmetrised according
+                to the operations in this list. 
         """
         structure = diffusion_analyzer.structure
         trajectories = []
@@ -196,8 +212,8 @@ class ProbabilityDensityAnalysis(object):
         trajectories = np.array(trajectories)
 
         return ProbabilityDensityAnalysis(structure, trajectories,
-                                          interval=interval, species=species)
-
+                                          interval=interval, species=species,
+                                          symmetry_operations=symmetry_operations)
 
     def generate_stable_sites(self, p_ratio=0.25, d_cutoff=1.0):
         """
@@ -266,7 +282,6 @@ class ProbabilityDensityAnalysis(object):
             stable_sites.append(np.mean(members, axis=0).tolist())
 
         self.stable_sites = stable_sites
-
 
     def get_full_structure(self):
         """
