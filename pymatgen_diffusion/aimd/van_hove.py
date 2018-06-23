@@ -282,22 +282,33 @@ class RadialDistributionFunction(object):
 
     # todo: volume change correction for NpT RDF
     def __init__(self, structures, ngrid=101, rmax=10.0, cellrange=1, sigma=0.1,
-                 species=("Li", "Na"), reference_species=None):
+                 species=("Li", "Na"), reference_species=None,
+                 species_indices=None, reference_species_indices=None):
         """
         Args:
             structures (list of pmg_structure objects): List of structure
                 objects with the same composition. Allow for ensemble averaging.
-            ngrid (int): Number of radial grid points.
+            ngrid (int): Number of radial grid points. Defaults to 101.
             rmax (float): Maximum of radial grid (the minimum is always set zero).
+                Default is 10.0.
             cellrange (int): Range of translational vector elements associated
                 with supercell. Default is 1, i.e. including the adjecent image
                 cells along all three directions.
-            sigma (float): Smearing of a Gaussian function.
-            species (list[string]): A list of specie symbols of interest.
-            reference_species (list[string]): set this option along with 'species'
+            sigma (float): Smearing of a Gaussian function. Default is 0.1.
+            species (list[string], optional): A list of specie symbols of interest.
+                Default is ['Li', 'Na'].
+            reference_species (list[string], optional): set this option along with 'species'
                 parameter to compute pair radial distribution function.
                 eg: species=["H"], reference_species=["O"] to compute
                     O-H pair distribution in a water MD simulation.
+                Default is None.
+            species_indices (list[int], optional): A list of atom indices of interest.
+                If this argument is set, it will overwrite the `species` argument.
+                Default is None.
+            reference_species_indices (list[int], optional): set this option to compute
+                a pair radial distribution function. If this argument is set, it will
+                overwrite the `reference_species` argument.
+                Default is None.
         """
 
         if ngrid < 2:
@@ -306,13 +317,18 @@ class RadialDistributionFunction(object):
             raise ValueError( "sigma should be a positive number!" )
 
         lattice = structures[0].lattice
-        indices = [j for j, site in enumerate(structures[0])
-                   if site.specie.symbol in species]
+        if species_indices:
+            indices = species_indices
+        else:
+            indices = [j for j, site in enumerate(structures[0])
+                       if site.specie.symbol in species]
 
         if len(indices) < 1:
             raise ValueError( "Given species are not in the structure!" )
 
-        if reference_species:
+        if reference_species_indices:
+            ref_indices = reference_species_indices
+        elif reference_species:
             ref_indices = [j for j, site in enumerate(structures[0])
                            if site.specie.symbol in reference_species]
             if len(ref_indices) < 1:
