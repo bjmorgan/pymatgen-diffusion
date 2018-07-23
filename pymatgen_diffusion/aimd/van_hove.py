@@ -326,7 +326,7 @@ class RadialDistributionFunction(object):
         if len(indices) < 1:
             raise ValueError( "Given species are not in the structure!" )
 
-        if reference_species_indices:
+        if reference_species_indices is not None:
             ref_indices = reference_species_indices
         elif reference_species:
             ref_indices = [j for j, site in enumerate(structures[0])
